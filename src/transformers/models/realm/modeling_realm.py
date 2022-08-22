@@ -1318,49 +1318,73 @@ class RealmScorer(RealmPreTrainedModel):
 
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        if input_ids is None and inputs_embeds is None:
-            raise ValueError("You have to specify either input_ids or input_embeds.")
+        # if input_ids is None and inputs_embeds is None:
+        #     raise ValueError("You have to specify either input_ids or input_embeds.")
 
-        if candidate_input_ids is None and candidate_inputs_embeds is None:
-            raise ValueError("You have to specify either candidate_input_ids or candidate_inputs_embeds.")
+        # if candidate_input_ids is None and candidate_inputs_embeds is None:
+        #     raise ValueError("You have to specify either candidate_input_ids or candidate_inputs_embeds.")
 
-        query_outputs = self.query_embedder(
-            input_ids,
-            attention_mask=attention_mask,
-            token_type_ids=token_type_ids,
-            position_ids=position_ids,
-            head_mask=head_mask,
-            inputs_embeds=inputs_embeds,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
-        )
+        if not (input_ids is None and inputs_embeds is None):
+            query_outputs = self.query_embedder(
+                input_ids,
+                attention_mask=attention_mask,
+                token_type_ids=token_type_ids,
+                position_ids=position_ids,
+                head_mask=head_mask,
+                inputs_embeds=inputs_embeds,
+                output_attentions=output_attentions,
+                output_hidden_states=output_hidden_states,
+                return_dict=return_dict,
+            )
 
-        # [batch_size * num_candidates, candidate_seq_len]
-        (flattened_input_ids, flattened_attention_mask, flattened_token_type_ids) = self._flatten_inputs(
-            candidate_input_ids, candidate_attention_mask, candidate_token_type_ids
-        )
+            # [batch_size, retriever_proj_size]
+            query_score = query_outputs[0]
+        else:
+            query_score = None
 
-        candidate_outputs = self.embedder(
-            flattened_input_ids,
-            attention_mask=flattened_attention_mask,
-            token_type_ids=flattened_token_type_ids,
-            position_ids=position_ids,
-            head_mask=head_mask,
-            inputs_embeds=candidate_inputs_embeds,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
-        )
+        if not (candidate_input_ids is None and candidate_inputs_embeds is None):
+            flatten_inputs = candidate_input_ids.dim() > 2
 
-        # [batch_size, retriever_proj_size]
-        query_score = query_outputs[0]
-        # [batch_size * num_candidates, retriever_proj_size]
-        candidate_score = candidate_outputs[0]
-        # [batch_size, num_candidates, retriever_proj_size]
-        candidate_score = candidate_score.view(-1, self.config.num_candidates, self.config.retriever_proj_size)
-        # [batch_size, num_candidates]
-        relevance_score = torch.einsum("BD,BND->BN", query_score, candidate_score)
+            if flatten_inputs:
+                # [batch_size * num_candidates, candidate_seq_len]
+                (flattened_input_ids, flattened_attention_mask, flattened_token_type_ids) = self._flatten_inputs(
+                    candidate_input_ids, candidate_attention_mask, candidate_token_type_ids
+                )
+            else:
+                (flattened_input_ids, flattened_attention_mask, flattened_token_type_ids) = (
+                    candidate_input_ids, candidate_attention_mask, candidate_token_type_ids
+                )
+
+            candidate_outputs = self.embedder(
+                flattened_input_ids,
+                attention_mask=flattened_attention_mask,
+                token_type_ids=flattened_token_type_ids,
+                position_ids=position_ids,
+                head_mask=head_mask,
+                inputs_embeds=candidate_inputs_embeds,
+                output_attentions=output_attentions,
+                output_hidden_states=output_hidden_states,
+                return_dict=return_dict,
+            )
+
+            # [batch_size * num_candidates, retriever_proj_size]
+            candidate_score = candidate_outputs[0]
+
+            # Morph scores back into batched form
+            if flatten_inputs:
+                # [batch_size, num_candidates, retriever_proj_size]
+                candidate_score = candidate_score.view(-1, self.config.num_candidates, self.config.retriever_proj_size)
+        else:
+            candidate_score = None
+
+        if query_score is not None and candidate_score is not None:
+            if flatten_inputs:
+                # [batch_size, num_candidates]
+                relevance_score = torch.einsum("BD,BND->BN", query_score, candidate_score)
+            else:
+                relevance_score = torch.einsum("BD,ND->BN", query_score, candidate_score)
+        else:
+            relevance_score = None
 
         if not return_dict:
             return relevance_score, query_score, candidate_score
